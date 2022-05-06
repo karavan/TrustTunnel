@@ -8,10 +8,12 @@ use crate::forwarder::Forwarder;
 use crate::{datagram_pipe, downstream, log_id, log_utils, pipe, udp_pipe};
 use crate::pipe::{DuplexPipe, SimplexPipe, SimplexPipeDirection};
 use crate::settings::Settings;
+use crate::shutdown::Shutdown;
 
 
 pub(crate) struct Tunnel {
     core_settings: Arc<Settings>,
+    shutdown: Arc<Mutex<Shutdown>>,
     downstream: Box<dyn Downstream>,
     forwarder: Arc<Mutex<Box<dyn Forwarder>>>,
     id: log_utils::IdChain<u64>,
@@ -21,12 +23,14 @@ pub(crate) struct Tunnel {
 impl Tunnel {
     pub fn new(
         core_settings: Arc<Settings>,
+        shutdown: Arc<Mutex<Shutdown>>,
         downstream: Box<dyn Downstream>,
         forwarder: Box<dyn Forwarder>,
         id: log_utils::IdChain<u64>,
     ) -> Self {
         Self {
             core_settings,
+            shutdown,
             downstream,
             forwarder: Arc::new(Mutex::new(forwarder)),
             id,
@@ -34,6 +38,22 @@ impl Tunnel {
     }
 
     pub async fn listen(&mut self) -> io::Result<()> {
+        let (mut shutdown_notification, _shutdown_completion) = {
+            let shutdown = self.shutdown.lock().unwrap();
+            (shutdown.notification_handler(), shutdown.completion_guard())
+        };
+        tokio::select! {
+            x = shutdown_notification.wait() => {
+                match x {
+                    Ok(_) => self.downstream.graceful_shutdown().await,
+                    Err(e) => Err(io::Error::new(ErrorKind::Other, format!("{}", e))),
+                }
+            }
+            x = self.listen_inner() => x,
+        }
+    }
+
+    async fn listen_inner(&mut self) -> io::Result<()> {
         loop {
             let request = match tokio::time::timeout(
                 self.core_settings.client_listener_timeout, self.downstream.listen()

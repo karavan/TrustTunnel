@@ -120,4 +120,7 @@ pub(crate) trait HttpCodec: Send {
     /// `Some` in case a client initiated the new stream which should be processed and listening
     /// should be continued.
     async fn listen(&mut self) -> io::Result<Option<Box<dyn Stream>>>;
+
+    /// Shut down the HTTP session gracefully
+    async fn graceful_shutdown(&mut self) -> io::Result<()>;
 }

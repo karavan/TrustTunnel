@@ -125,6 +125,23 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
 
         Ok(None)
     }
+
+    async fn graceful_shutdown(&mut self) -> io::Result<()> {
+        let session = match &mut self.state {
+            State::Handshake(_) => return Ok(()),
+            State::Established(s) => s,
+        };
+
+        session.graceful_shutdown();
+
+        loop {
+            match session.accept().await {
+                None => break Ok(()),
+                Some(Err(e)) if e.is_io() => break Err(e.into_io().unwrap()),
+                Some(_) => continue,
+            }
+        }
+    }
 }
 
 impl http_codec::Stream for Stream {

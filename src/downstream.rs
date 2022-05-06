@@ -87,6 +87,9 @@ pub(crate) trait Downstream: Send {
     /// `Some` in case the downstream encountered the new authorization request which should be
     /// processed and listening should be continued.
     async fn listen(&mut self) -> io::Result<Option<Box<dyn AuthorizationRequest>>>;
+
+    /// Shut down the downstream connection gracefully
+    async fn graceful_shutdown(&mut self) -> io::Result<()>;
 }
 
 impl Debug for UdpDatagram {

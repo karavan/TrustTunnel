@@ -4,6 +4,7 @@ extern crate log;
 pub mod authorization;
 pub mod core;
 pub mod settings;
+pub mod shutdown;
 
 mod direct_forwarder;
 mod downstream;

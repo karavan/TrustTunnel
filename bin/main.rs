@@ -3,6 +3,7 @@ use std::io::BufReader;
 use log::{Level, LevelFilter, Metadata, Record};
 use vpn_libs_endpoint::core::Core;
 use vpn_libs_endpoint::settings::Settings;
+use vpn_libs_endpoint::shutdown::Shutdown;
 
 
 const LOG_LEVEL_PARAM_NAME: &str = "log_level";
@@ -58,8 +59,23 @@ fn main() {
         File::open(config_path).expect("Couldn't open the configuration file")
     )).expect("Failed parsing the configuration file");
 
-    let mut core = Core::new(parsed);
-    core.listen().unwrap()
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let shutdown = Shutdown::new();
+    let mut core = Core::new(parsed, shutdown.clone());
+
+    rt.spawn_blocking(move || {
+        core.listen().unwrap()
+    });
+
+    rt.block_on(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        shutdown.lock().unwrap().submit();
+        shutdown.lock().unwrap().completion().await;
+    });
 }
 
 

@@ -231,6 +231,10 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> http_codec::HttpCodec for Http1C
             }
         }
     }
+
+    async fn graceful_shutdown(&mut self) -> io::Result<()> {
+        self.transport_stream.shutdown().await
+    }
 }
 
 impl http_codec::Stream for Stream {

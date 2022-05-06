@@ -262,6 +262,10 @@ impl HttpCodec for Http3Codec {
             }
         }
     }
+
+    async fn graceful_shutdown(&mut self) -> io::Result<()> {
+        self.socket.graceful_shutdown()
+    }
 }
 
 impl StreamMessage {

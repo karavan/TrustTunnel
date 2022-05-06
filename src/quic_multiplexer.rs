@@ -612,6 +612,12 @@ impl QuicSocket {
         let _ = self.quic_conn.lock().unwrap().stream_shutdown(stream_id, direction, 0);
     }
 
+    pub fn graceful_shutdown(&self) -> io::Result<()> {
+        self.quic_conn.lock().unwrap().close(true, 0, b"bye")
+            .map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))?;
+        self.flush_pending_data()
+    }
+
     pub fn close_stream(&self, stream_id: u64) {
         self.shutdown_stream(stream_id, quiche::Shutdown::Read);
         self.shutdown_stream(stream_id, quiche::Shutdown::Write);

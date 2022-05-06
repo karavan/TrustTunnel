@@ -1,6 +1,6 @@
 use std::io;
 use std::io::ErrorKind;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::{TcpListener, UdpSocket};
 use crate::direct_forwarder::DirectForwarder;
@@ -14,6 +14,7 @@ use crate::http_downstream::HttpDownstream;
 use crate::icmp_forwarder::IcmpForwarder;
 use crate::quic_multiplexer::QuicMultiplexer;
 use crate::settings::{ForwardProtocolSettings, ListenProtocolSettings, Settings};
+use crate::shutdown::Shutdown;
 use crate::socks5_forwarder::Socks5Forwarder;
 use crate::tls_listener::{TlsAcceptor, TlsListener};
 use crate::tunnel::Tunnel;
@@ -29,11 +30,13 @@ struct Context {
     next_client_id: Arc<AtomicU64>,
     next_tunnel_id: Arc<AtomicU64>,
     icmp_forwarder: Option<Arc<IcmpForwarder>>,
+    shutdown: Arc<Mutex<Shutdown>>,
 }
 
 impl Core {
     pub fn new(
         settings: Settings,
+        shutdown: Arc<Mutex<Shutdown>>,
     ) -> Self {
         let settings = Arc::new(settings);
 
@@ -47,6 +50,7 @@ impl Core {
                 } else {
                     Some(Arc::new(IcmpForwarder::new(settings)))
                 },
+                shutdown,
             }),
         }
     }
@@ -59,24 +63,36 @@ impl Core {
             self.listen_tcp().await
                 .map_err(|e| io::Error::new(e.kind(), format!("TCP listener failure: {}", e)))
         };
-        futures::pin_mut!(listen_tcp);
+
         let listen_udp = async {
             self.listen_udp().await
                 .map_err(|e| io::Error::new(e.kind(), format!("UDP listener failure: {}", e)))
         };
-        futures::pin_mut!(listen_udp);
 
         let listen_icmp = async {
             self.listen_icmp().await
                 .map_err(|e| io::Error::new(e.kind(), format!("ICMP listener failure: {}", e)))
         };
-        futures::pin_mut!(listen_icmp);
 
-        futures::future::try_join3(
-            listen_tcp,
-            listen_udp,
-            listen_icmp,
-        ).await.map(|_| ())
+        let (mut shutdown_notification, _shutdown_completion) = {
+            let shutdown = self.context.shutdown.lock().unwrap();
+            (
+                shutdown.notification_handler(),
+                shutdown.completion_guard()
+                    .ok_or_else(|| io::Error::new(ErrorKind::Other, "Shutdown is already submitted"))?
+            )
+        };
+
+        tokio::select! {
+            x = shutdown_notification.wait() => {
+                x.map_err(|e| io::Error::new(ErrorKind::Other, format!("{}", e)))
+            },
+            x = futures::future::try_join3(
+                listen_tcp,
+                listen_udp,
+                listen_icmp,
+            ) => x.map(|_| ()),
+        }
     }
 
     /// Run an endpoint instance in a blocking way.
@@ -177,6 +193,7 @@ impl Core {
                     log_id!(debug, socket_id, "New QUIC connection");
                     let mut tunnel = Tunnel::new(
                         context.core_settings.clone(),
+                        context.shutdown.clone(),
                         Box::new(HttpDownstream::new(
                             context.core_settings.clone(),
                             Box::new(Http3Codec::new(socket, socket_id.clone())),
@@ -259,6 +276,7 @@ impl Core {
                 log_id!(debug, tunnel_id, "New tunnel for client");
                 let mut tunnel = Tunnel::new(
                     core_settings.clone(),
+                    context.shutdown.clone(),
                     Box::new(HttpDownstream::new(
                         core_settings.clone(),
                         match protocol {

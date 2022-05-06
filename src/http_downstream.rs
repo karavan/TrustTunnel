@@ -141,6 +141,10 @@ impl Downstream for HttpDownstream {
             break Ok(Some(Box::new(TcpConnection { stream, id: stream_id })));
         }
     }
+
+    async fn graceful_shutdown(&mut self) -> io::Result<()> {
+        self.codec.graceful_shutdown().await
+    }
 }
 
 impl downstream::StreamId for TcpConnection {
