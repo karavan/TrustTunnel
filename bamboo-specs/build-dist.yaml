@@ -94,7 +94,7 @@ Build distribution:
     - artifact: Build result macOS
       destination: vpn-endpoint-build-results
   artifacts:
-    - name: Build result macOS
+    - name: Distribution
       location: .
       pattern: 'vpn_endpoint-*.zip'
       required: false
