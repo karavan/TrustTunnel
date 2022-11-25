@@ -590,19 +590,31 @@ impl QuicSocket {
     }
 
     pub fn read(&self, stream_id: u64) -> io::Result<Option<Bytes>> {
-        const READ_CHUNK_SIZE: usize = 64 * 1024;
-        let mut bytes = BytesMut::with_capacity(READ_CHUNK_SIZE);
-        bytes.resize(READ_CHUNK_SIZE, 0);
+        let chunk = {
+            const READ_CHUNK_SIZE: usize = 64 * 1024;
+            let mut bytes = BytesMut::with_capacity(READ_CHUNK_SIZE);
+            bytes.resize(READ_CHUNK_SIZE, 0);
 
-        let chunk = match self.h3_conn.lock().unwrap().recv_body(
-            &mut self.quic_conn.lock().unwrap(), stream_id, bytes.as_mut()
-        ) {
-            Ok(n) => {
-                bytes.truncate(n);
-                Some(bytes.freeze())
+            let mut read_offset = 0;
+            loop {
+                let buf = bytes.split_at_mut(read_offset).1;
+                match self.h3_conn.lock().unwrap().recv_body(
+                    &mut self.quic_conn.lock().unwrap(), stream_id, buf,
+                ) {
+                    Ok(n) => {
+                        read_offset += n;
+                        if read_offset == bytes.capacity() {
+                            break Some(bytes.freeze());
+                        }
+                    }
+                    Err(h3::Error::Done) if read_offset > 0 => {
+                        bytes.truncate(read_offset);
+                        break Some(bytes.freeze());
+                    }
+                    Err(h3::Error::Done) => break None,
+                    Err(e) => return Err(io::Error::new(ErrorKind::Other, e.to_string())),
+                };
             }
-            Err(h3::Error::Done) => None,
-            Err(e) => return Err(io::Error::new(ErrorKind::Other,e.to_string())),
         };
 
         self.flush_pending_data()?;

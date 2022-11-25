@@ -429,13 +429,17 @@ impl pipe::Sink for StreamSink {
 impl http_codec::DroppingSink for StreamSink {
     fn write(&mut self, data: Bytes) -> io::Result<datagram_pipe::SendStatus> {
         match self.socket.stream_capacity(self.stream_id) {
-            Ok(n) if n >= data_frame_overhead(data.len()) => (),
+            Ok(n) if n >= data_frame_overhead(data.len()) + data.len() => (),
             Ok(_) => return Ok(datagram_pipe::SendStatus::Dropped),
             Err(e) => return Err(io::Error::new(ErrorKind::Other, e.to_string())),
         }
 
         let unsent = self.socket.write(self.stream_id, data)?;
-        assert!(unsent.is_empty());
+        if !unsent.is_empty() {
+            return Err(io::Error::new(
+                ErrorKind::Other, "Packet was sent partially while should've been sent entirely"
+            ));
+        }
         Ok(datagram_pipe::SendStatus::Sent)
     }
 }
