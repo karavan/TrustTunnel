@@ -426,11 +426,11 @@ impl Settings {
     }
 
     fn default_tcp_connections_timeout() -> Duration {
-        Duration::from_secs(30)
+        Duration::from_secs(604800) // 1 week (match client tcpip module)
     }
 
     fn default_udp_connections_timeout() -> Duration {
-        Duration::from_secs(30)
+        Duration::from_secs(300) // 5 minutes (match client tcpip module)
     }
 }
 
