@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use crate::forwarder::TcpConnector;
@@ -183,6 +183,10 @@ impl pipe::Sink for StreamTx {
         }
 
         self.tx.writable().await
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        self.tx.flush().await
     }
 }
 

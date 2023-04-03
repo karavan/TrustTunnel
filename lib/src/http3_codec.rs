@@ -15,11 +15,9 @@ use crate::quic_multiplexer::{QuicSocket, QuicSocketEvent};
 pub(crate) struct Http3Codec {
     socket: Arc<QuicSocket>,
     streams: HashMap<u64, Stream>,
-    /// Receives messages from [`DetachedStream.stream_event_tx`], [`StreamSource.stream_event_tx`],
-    /// and [`StreamSink.stream_event_tx`]
+    /// Receives messages from [`StreamSource.codec_tx`] and [`StreamSink.codec_tx`]
     stream_rx: mpsc::UnboundedReceiver<StreamMessage>,
-    /// See [`DetachedStream.stream_event_tx`], [`StreamSource.stream_event_tx`], and
-    /// [`StreamSink.stream_event_tx`]
+    /// See [`StreamSource.codec_tx`] and [`StreamSink.codec_tx`]
     codec_tx: Arc<mpsc::UnboundedSender<StreamMessage>>,
     parent_id_chain: log_utils::IdChain<u64>,
 }
@@ -50,7 +48,7 @@ struct StreamSource {
     socket: Arc<QuicSocket>,
     /// Receives messages from [`Stream.readable_event_tx`]
     readable_event_rx: mpsc::Receiver<()>,
-    /// Sends messages to [`Http3Codec.stream_event_rx`]
+    /// Sends messages to [`Http3Codec.stream_rx`]
     codec_tx: Arc<mpsc::UnboundedSender<StreamMessage>>,
     id: log_utils::IdChain<u64>,
 }
@@ -60,7 +58,7 @@ struct StreamSink {
     socket: Arc<QuicSocket>,
     /// Receives messages from [`Stream.writable_event_tx`]
     writable_event_rx: mpsc::Receiver<()>,
-    /// Sends messages to [`Http3Codec.stream_event_rx`]
+    /// Sends messages to [`Http3Codec.stream_rx`]
     codec_tx: Arc<mpsc::UnboundedSender<StreamMessage>>,
     /// Equals to [`net_utils::MIN_USABLE_QUIC_STREAM_CAPACITY`] by default.
     /// In some cases may be assigned to different values
@@ -365,7 +363,7 @@ impl http_codec::PendingRespond for StreamSink {
     {
         log_id!(debug, self.id, "Sending response: {:?} (eof={})", response, eof);
 
-        self.socket.send_response(self.stream_id, response, eof)?;
+        self.socket.send_response(self.stream_id, response, false)?;
 
         if eof {
             self.codec_tx.send(StreamMessage::Shutdown(self.stream_id, None))

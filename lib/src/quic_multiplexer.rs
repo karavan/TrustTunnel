@@ -569,9 +569,7 @@ impl QuicSocket {
 
     pub fn send_response(&self, stream_id: u64, response: ResponseHeaders, fin: bool) -> io::Result<()> {
         let response: Vec<_> =
-            std::iter::once(h3::HeaderRef::new(
-                ":status".as_bytes(), response.status.as_str().as_bytes(),
-            ))
+            std::iter::once(h3::HeaderRef::new(b":status", response.status.as_str().as_bytes()))
                 .chain(response.headers.iter()
                     .map(|(n, v)| h3::HeaderRef::new(n.as_ref(), v.as_ref())))
                 .collect();
@@ -641,10 +639,28 @@ impl QuicSocket {
     }
 
     pub fn shutdown_stream(&self, stream_id: u64, direction: quiche::Shutdown) {
-        let _ = self.quic_conn.lock().unwrap().stream_shutdown(stream_id, direction, 0);
+        match direction {
+            quiche::Shutdown::Write => {
+                // `stream_shutdown(Write)` is dropping still unsent data
+                let _ = self.quic_conn.lock().unwrap().stream_send(stream_id, &[], true);
+            }
+            quiche::Shutdown::Read => {
+                let _ = self.quic_conn.lock().unwrap().stream_shutdown(stream_id, direction, 0);
+            }
+        }
+        let _ = self.flush_pending_data();
     }
 
     pub fn graceful_shutdown(&self) -> io::Result<()> {
+        {
+            let mut quic_conn = self.quic_conn.lock().unwrap();
+            let mut h3_conn = self.h3_conn.lock().unwrap();
+            for stream_id in quic_conn.writable() {
+                let _ = h3_conn.send_body(&mut quic_conn, stream_id, &[], true);
+            }
+        }
+        let _ = self.flush_pending_data();
+
         self.quic_conn.lock().unwrap().close(true, 0, b"bye")
             .map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))?;
         self.flush_pending_data()

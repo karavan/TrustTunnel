@@ -28,9 +28,9 @@ pub(crate) struct Http1Codec<IO> {
     /// Waits notify from [`StreamSink.download_eof`]
     download_eof: Arc<Notify>,
     /// See [`StreamSource.upload_rx`]
-    upload_rx: Option<mpsc::Receiver<Option<Bytes>>>,
+    upload_rx: Option<mpsc::Receiver<Bytes>>,
     /// Sends messages to [`StreamSource.upload_rx`]
-    upload_tx: mpsc::Sender<Option<Bytes>>,
+    upload_tx: mpsc::Sender<Bytes>,
     upload_buffer_size: usize,
     parent_id_chain: log_utils::IdChain<u64>,
     next_request_id: std::ops::RangeFrom<u64>,
@@ -63,7 +63,7 @@ struct StreamSource {
     request: RequestHeaders,
     client_address: IpAddr,
     /// Receives messages from [`Http1Codec.upload_tx`]
-    upload_rx: mpsc::Receiver<Option<Bytes>>,
+    upload_rx: mpsc::Receiver<Bytes>,
     id: log_utils::IdChain<u64>,
 }
 
@@ -187,10 +187,10 @@ impl<IO> http_codec::HttpCodec for Http1Codec<IO>
 
             tokio::select! {
                 r = wait_read => match r {
+                    Ok(bytes) if bytes.is_empty() =>
+                        return self.graceful_shutdown().await.map(|()| None),
                     Ok(bytes) => match &mut self.state {
-                        State::WaitingRequest(_) => if bytes.is_empty() {
-                            return Ok(None);
-                        } else {
+                        State::WaitingRequest(_) => {
                             match self.on_request_headers_chunk(bytes)? {
                                 RequestStatus::Partial => (),
                                 RequestStatus::Complete(stream) => return Ok(Some(stream)),
@@ -204,7 +204,7 @@ impl<IO> http_codec::HttpCodec for Http1Codec<IO>
                         }
                         State::RequestInProgress(x) => {
                             x.buffer = BytesMut::with_capacity(self.upload_buffer_size);
-                            match self.upload_tx.send((!bytes.is_empty()).then(|| bytes.freeze())).await {
+                            match self.upload_tx.send(bytes.freeze()).await {
                                 Ok(_) => (),
                                 Err(_) => return Err(io::Error::from(ErrorKind::UnexpectedEof)),
                             }
@@ -241,6 +241,7 @@ impl<IO> http_codec::HttpCodec for Http1Codec<IO>
             self.transport_stream.write_all_buf(&mut chunk).await?;
         }
         self.transport_stream.flush().await?;
+        let _ = self.upload_tx.reserve().await;
         self.transport_stream.shutdown().await
     }
 
@@ -336,7 +337,7 @@ impl pipe::Source for StreamSource {
     }
 
     async fn read(&mut self) -> io::Result<pipe::Data> {
-        match self.upload_rx.recv().await.flatten() {
+        match self.upload_rx.recv().await {
             None => Ok(pipe::Data::Eof),
             Some(bytes) => Ok(pipe::Data::Chunk(bytes)),
         }
@@ -349,7 +350,7 @@ impl pipe::Source for StreamSource {
 }
 
 impl http_codec::RespondedStreamSink for StreamSink {
-    fn into_pipe_sink(self: Box<Self>) -> Box<dyn pipe::Sink> {
+    fn into_pipe_sink(self: Box<Self>) -> Box<dyn Sink> {
         self
     }
 

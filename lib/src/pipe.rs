@@ -70,6 +70,12 @@ pub(crate) trait Sink: Send {
     /// Wait for the connection to be writable. Should be called if [`Self::write()`] return non-empty
     /// buffer.
     async fn wait_writable(&mut self) -> io::Result<()>;
+
+    /// Flush all intermediately buffered contents.
+    /// By default, just waits for the writable state.
+    async fn flush(&mut self) -> io::Result<()> {
+        self.wait_writable().await
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -93,6 +99,11 @@ pub(crate) struct SimplexPipe<F> {
 pub(crate) struct Error<T> {
     pub id: T,
     pub io: io::Error,
+}
+
+pub(crate) enum ExchangeOnceStatus<T> {
+    TimedOut(T),
+    Finished(T),
 }
 
 
@@ -132,7 +143,7 @@ impl<F: Fn(SimplexDirection, usize) + Send> SimplexPipe<F> {
     }
 
     /// Initiate data exchange until the `Source` is closed or some error happened
-    pub async fn exchange<T: Copy>(&mut self, id: T, timeout: Duration) -> Result<T, Error<T>> {
+    pub async fn exchange<T: Copy>(&mut self, id: T, timeout: Duration) -> Result<ExchangeOnceStatus<T>, Error<T>> {
         loop {
             self.last_activity = Instant::now();
 
@@ -150,9 +161,10 @@ impl<F: Fn(SimplexDirection, usize) + Send> SimplexPipe<F> {
                 }
             }.boxed();
 
-            let data = tokio::time::timeout(timeout, future).await
-                .unwrap_or_else(|_| Err(io::Error::from(ErrorKind::TimedOut)))
-                .map_err(|e| io_to_pipe_error(id, e))?;
+            let data = match tokio::time::timeout(timeout, future).await {
+                Ok(x) => x.map_err(|e| io_to_pipe_error(id, e))?,
+                Err(_elapsed) => break Ok(ExchangeOnceStatus::TimedOut(id)),
+            };
 
             match data {
                 Data::Chunk(bytes) => {
@@ -168,9 +180,12 @@ impl<F: Fn(SimplexDirection, usize) + Send> SimplexPipe<F> {
                         self.pending_chunk = Some(Data::Chunk(unsent_data));
                     }
                 }
-                Data::Eof => return self.sink.eof()
-                    .map_err(|e| io_to_pipe_error(id, e))
-                    .map(|_| id),
+                Data::Eof => {
+                    self.sink.eof().map_err(|e| io_to_pipe_error(id, e))?;
+                    break self.sink.flush().await
+                        .map(|()| ExchangeOnceStatus::Finished(id))
+                        .map_err(|e| io_to_pipe_error(id, e));
+                }
             }
         }
     }
@@ -194,40 +209,50 @@ impl<F: Fn(SimplexDirection, usize) + Send + Clone> DuplexPipe<F> {
     }
 
     pub async fn exchange(&mut self, timeout: Duration) -> io::Result<()> {
+        let id = self.left_pipe.source.id();
         loop {
-            match self.exchange_once(timeout).await {
-                Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    let last_unexpired_timestamp = Instant::now() - timeout;
-                    if self.left_pipe.last_activity < last_unexpired_timestamp
-                        && self.right_pipe.last_activity < last_unexpired_timestamp
+            match self.exchange_once(timeout, &id).await? {
+                ExchangeOnceStatus::Finished(()) => break Ok(()),
+                ExchangeOnceStatus::TimedOut(()) => {
+                    let expiration_deadline = Instant::now() - timeout;
+                    if self.left_pipe.last_activity < expiration_deadline
+                        && self.right_pipe.last_activity < expiration_deadline
                     {
-                        return Err(e);
+                        break Err(ErrorKind::TimedOut.into());
                     }
                     // it is ok if only one of them timed out
                 }
-                x => return x,
             }
         }
     }
 
-    async fn exchange_once(&mut self, timeout: Duration) -> io::Result<()> {
-        let id = self.left_pipe.source.id();
+    async fn exchange_once(
+        &mut self, timeout: Duration, id: &log_utils::IdChain<u64>,
+    ) -> io::Result<ExchangeOnceStatus<()>> {
         let f1 = self.left_pipe.exchange(self.left_pipe.direction, timeout);
         futures::pin_mut!(f1);
         let f2 = self.right_pipe.exchange(self.right_pipe.direction, timeout);
         futures::pin_mut!(f2);
 
         match future::try_select(f1, f2).await {
-            Ok(Either::Left((dir, another)))
-            | Ok(Either::Right((dir, another))) => {
+            Ok(Either::Left((ExchangeOnceStatus::Finished(dir), another)))
+            | Ok(Either::Right((ExchangeOnceStatus::Finished(dir), another))) => {
                 log_dir!(trace, id, dir, "Pipe gracefully closed");
-                another.await
-                    .map(|_| ())
-                    .map_err(|e| {
-                        log_dir!(debug, id, e.id, "Error on pipe: {}", e.io);
-                        e.io
-                    })
+                let ret = match another.await {
+                    Ok(ExchangeOnceStatus::Finished(_)) => Ok(ExchangeOnceStatus::Finished(())),
+                    Ok(ExchangeOnceStatus::TimedOut(dir)) =>
+                        Err(io_to_pipe_error(dir, ErrorKind::TimedOut.into())),
+                    Err(e) => Err(e),
+                };
+
+                if let Err(e) = &ret {
+                    log_dir!(debug, id, e.id, "Error on pipe: {}", e.io);
+                }
+                ret.map_err(|e| e.io)
             }
+            Ok(Either::Left((ExchangeOnceStatus::TimedOut(_), _)))
+            | Ok(Either::Right((ExchangeOnceStatus::TimedOut(_), _))) =>
+                Ok(ExchangeOnceStatus::TimedOut(())),
             Err(Either::Left((e, _))) | Err(Either::Right((e, _))) => {
                 if e.io.kind() != ErrorKind::WouldBlock {
                     log_dir!(debug, id, e.id, "Error on pipe: {}", e.io);

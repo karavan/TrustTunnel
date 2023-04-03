@@ -2,8 +2,9 @@ use std::io;
 use std::io::ErrorKind;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use bytes::{BufMut, BytesMut};
-use crate::{forwarder, http1_codec, log_id, log_utils, pipe, settings, tunnel};
+use crate::{forwarder, http1_codec, http_codec, log_id, log_utils, pipe, settings, tunnel};
 use crate::forwarder::TcpConnector;
 use crate::http_codec::HttpCodec;
 use crate::net_utils::TcpDestination;
@@ -13,8 +14,12 @@ use crate::tls_demultiplexer::Protocol;
 use crate::tcp_forwarder::TcpForwarder;
 
 
-const ORIGINAL_PROTOCOL_HEADER: &str = "X-Original-Protocol";
+static ORIGINAL_PROTOCOL_HEADER: http::HeaderName = http::HeaderName::from_static("x-original-protocol");
 
+#[derive(Default)]
+struct SessionManager {
+    active_streams_num: AtomicUsize,
+}
 
 pub(crate) async fn listen(
     settings: Arc<settings::Settings>,
@@ -35,12 +40,7 @@ pub(crate) async fn listen(
                 Err(e) => log_id!(debug, log_id, "Shutdown notification failure: {}", e),
             }
         },
-        x = listen_inner(settings, codec.as_mut(), sni, &log_id) => {
-            match x {
-                Ok(_) => (),
-                Err(e) => log_id!(debug, log_id, "Request processing failure: {}", e),
-            }
-        },
+        _ = listen_inner(settings, codec.as_mut(), sni, &log_id) => (),
     }
 
     if let Err(e) = codec.graceful_shutdown().await {
@@ -53,61 +53,68 @@ async fn listen_inner(
     codec: &mut dyn HttpCodec,
     sni: String,
     log_id: &log_utils::IdChain<u64>,
-) -> io::Result<()> {
-    let mut pipe = match tokio::time::timeout(
-        settings.reverse_proxy.as_ref().unwrap().connection_timeout,
-        establish_tunnel(&settings, codec, sni, log_id),
-    ).await.map_err(|_| io::Error::from(ErrorKind::TimedOut))?? {
-        Some(((client_source, client_sink), (server_source, server_sink))) =>
-            DuplexPipe::new(
-                (pipe::SimplexDirection::Outgoing, client_source, server_sink),
-                (pipe::SimplexDirection::Incoming, server_source, client_sink),
-                |_, _| (),
-            ),
-        None => return Ok(()),
-    };
-
-    let listen_io = async move {
-        match codec.listen().await {
-            Ok(Some(x)) => Err(io::Error::new(
-                ErrorKind::Other,
-                format!("Got unexpected request while processing previous: {:?}", x.request().request()),
-            )),
-            Ok(None) => Ok(()),
-            Err(e) => Err(e),
+) {
+    let manager = Arc::new(SessionManager::default());
+    let timeout = settings.connection_establishment_timeout;
+    loop {
+        match tokio::time::timeout(timeout, codec.listen()).await {
+            Ok(Ok(Some(x))) => {
+                tokio::spawn({
+                    let settings = settings.clone();
+                    let manager = manager.clone();
+                    let protocol = codec.protocol();
+                    let sni = sni.clone();
+                    let log_id = log_id.clone();
+                    async move {
+                        if let Err(e) = handle_stream(settings, x, protocol, sni, &log_id).await {
+                            log_id!(debug, log_id, "Request failed: {}", e);
+                        }
+                        manager.active_streams_num.fetch_sub(1, Ordering::AcqRel);
+                    }
+                });
+            }
+            Ok(Ok(None)) => {
+                log_id!(trace, log_id, "Connection closed");
+                break;
+            }
+            Ok(Err(ref e)) if e.kind() == ErrorKind::UnexpectedEof => {
+                log_id!(trace, log_id, "Connection closed");
+                break;
+            }
+            Ok(Err(e)) => {
+                log_id!(debug, log_id, "Session error: {}", e);
+                break;
+            }
+            Err(_elapsed) if manager.active_streams_num.load(Ordering::Acquire) > 0 =>
+                log_id!(trace, log_id, "Ignoring timeout due to there are some active streams"),
+            Err(_elapsed) => {
+                log_id!(debug, log_id, "Closing due to timeout");
+                if let Err(e) = codec.graceful_shutdown().await {
+                    log_id!(debug, log_id, "Failed to shut down session: {}", e);
+                }
+                break;
+            }
         }
-    };
-
-    tokio::try_join!(
-        listen_io,
-        pipe.exchange(settings.reverse_proxy.as_ref().unwrap().connection_timeout),
-    ).map(|_| ())
+    }
 }
 
-async fn establish_tunnel(
-    settings: &Arc<settings::Settings>,
-    codec: &mut dyn HttpCodec,
+async fn handle_stream(
+    core_settings: Arc<settings::Settings>,
+    stream: Box<dyn http_codec::Stream>,
+    protocol: Protocol,
     sni: String,
     log_id: &log_utils::IdChain<u64>,
-) -> io::Result<Option<(
-    (Box<dyn pipe::Source>, Box<dyn pipe::Sink>),
-    (Box<dyn pipe::Source>, Box<dyn pipe::Sink>),
-)>> {
-    let (request, respond) = match codec.listen().await? {
-        Some(x) => x.split(),
-        None => {
-            log_id!(debug, log_id, "Connection closed before any request");
-            return Ok(None);
-        }
-    };
+) -> io::Result<()> {
+    let (request, respond) = stream.split();
     log_id!(trace, log_id, "Received request: {:?}", request.request());
 
-    let forwarder = Box::new(TcpForwarder::new(settings.clone()));
+    let forwarder = Box::new(TcpForwarder::new(core_settings.clone()));
+    let settings = core_settings.reverse_proxy.as_ref().unwrap();
     let (mut server_source, mut server_sink) = forwarder.connect(
         log_id.clone(),
         forwarder::TcpConnectionMeta {
             client_address: Ipv4Addr::UNSPECIFIED.into(),
-            destination: TcpDestination::Address(settings.reverse_proxy.as_ref().unwrap().server_address),
+            destination: TcpDestination::Address(settings.server_address),
             auth: None,
             tls_domain: sni,
             user_agent: None,
@@ -119,12 +126,12 @@ async fn establish_tunnel(
 
     let mut request_headers = request.clone_request();
     let original_version = request_headers.version;
-    match codec.protocol() {
+    match protocol {
         Protocol::Http1 => (),
         Protocol::Http2 => unreachable!(),
         Protocol::Http3 => {
             request_headers.version = http::Version::HTTP_11;
-            if settings.reverse_proxy.as_ref().unwrap().h3_backward_compatibility
+            if settings.h3_backward_compatibility
                 && request_headers.method == http::Method::GET
                 && request_headers.uri.path() == "/"
             {
@@ -133,8 +140,8 @@ async fn establish_tunnel(
         }
     }
     request_headers.headers.insert(
-        ORIGINAL_PROTOCOL_HEADER,
-        http::HeaderValue::from_static(codec.protocol().as_str()),
+        &ORIGINAL_PROTOCOL_HEADER,
+        http::HeaderValue::from_static(protocol.as_str()),
     );
 
     let encoded = http1_codec::encode_request(&request_headers);
@@ -164,10 +171,15 @@ async fn establish_tunnel(
 
     let mut client_sink = respond.send_response(response, false)?
         .into_pipe_sink();
+    let chunk_len = chunk.len();
     client_sink.write_all(chunk).await?;
+    server_source.consume(chunk_len)?;
 
-    Ok(Some((
-        (request.finalize(), client_sink),
-        (server_source, server_sink),
-    )))
+    let mut pipe = DuplexPipe::new(
+        (pipe::SimplexDirection::Outgoing, request.finalize(), server_sink),
+        (pipe::SimplexDirection::Incoming, server_source, client_sink),
+        |_, _| (),
+    );
+
+    pipe.exchange(core_settings.tcp_connections_timeout).await
 }

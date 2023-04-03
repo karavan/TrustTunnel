@@ -1,5 +1,12 @@
 # CHANGELOG
 
+* Fixed enormous timeout of TCP connections establishment procedure.
+  API changes in the library:
+    * added `connection_establishment_timeout` field into `settings::Settings`
+
+  The executable related changes:
+    * the settings file is changed accordingly to the changes described above
+
 ## 0.9.36
 
 * The endpoint is now capable of handling service requests on the main tls domain.

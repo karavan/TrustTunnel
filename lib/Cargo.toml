@@ -41,7 +41,7 @@ once_cell = "=1.17.0"
 chrono = "0.4"
 
 [dev-dependencies]
-hyper = { version = "=0.14.25", features = ["http1", "http2", "client", "server"] }
+hyper = { version = "=0.14.25", features = ["http1", "http2", "client", "server", "runtime", "stream"] }
 rustls = { version = "=0.20.7", features = ["logging", "dangerous_configuration"] }
 
 [features]

@@ -137,7 +137,7 @@ impl Decoder {
                 None => return Bytes::new(),
             };
 
-        let payload_length = self.total_length - UDPPKT_IN_FIXED_HEADER_NO_LENGTH_SIZE - length;
+        let payload_length = self.total_length - UDPPKT_IN_FIXED_HEADER_SIZE - length;
         match std::str::from_utf8(name.as_ref()) {
             Ok(name) => {
                 self.app_name = Some(name.to_string());
@@ -249,4 +249,48 @@ enum RecvState {
 
 impl Default for RecvState {
     fn default() -> Self { RecvState::Length }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use bytes::{BufMut, Bytes};
+    use crate::http_datagram_codec::{Decoder, DecodeResult};
+    use crate::http_udp_codec;
+    use crate::http_udp_codec::UDPPKT_IN_FIXED_HEADER_SIZE;
+    use crate::log_utils::IdChain;
+
+    #[test]
+    fn decode() {
+        const APP_NAME: &str = "test";
+        const PAYLOAD: &str = "hello world!";
+        const SOURCE_IP: Ipv4Addr = Ipv4Addr::LOCALHOST;
+        const SOURCE_PORT: u16 = 1234;
+        const DESTINATION_IP: Ipv4Addr = Ipv4Addr::BROADCAST;
+        const DESTINATION_PORT: u16 = 9876;
+
+        let mut buffer = vec![];
+        buffer.put_u32((UDPPKT_IN_FIXED_HEADER_SIZE + APP_NAME.len() + PAYLOAD.len()) as u32);
+        buffer.put_slice(&[0; 12]);
+        buffer.put_slice(&SOURCE_IP.octets());
+        buffer.put_u16(SOURCE_PORT);
+        buffer.put_slice(&[0; 12]);
+        buffer.put_slice(&DESTINATION_IP.octets());
+        buffer.put_u16(DESTINATION_PORT);
+        buffer.put_u8(APP_NAME.len() as u8);
+        buffer.put_slice(APP_NAME.as_bytes());
+        buffer.put_slice(PAYLOAD.as_bytes());
+
+        let mut decoder = http_udp_codec::Decoder::new(IdChain::empty());
+        match decoder.decode_chunk(Bytes::from(buffer)) {
+            DecodeResult::WantMore => unreachable!(),
+            DecodeResult::Complete(datagram, tail) => {
+                assert_eq!(datagram.meta.source, (SOURCE_IP, SOURCE_PORT).into());
+                assert_eq!(datagram.meta.destination, (DESTINATION_IP, DESTINATION_PORT).into());
+                assert_eq!(datagram.meta.app_name.as_deref(), Some(APP_NAME));
+                assert_eq!(&datagram.payload, PAYLOAD.as_bytes());
+                assert_eq!(tail.len(), 0);
+            }
+        }
+    }
 }

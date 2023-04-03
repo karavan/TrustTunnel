@@ -27,6 +27,7 @@ pub(crate) struct Tunnel {
     id: log_utils::IdChain<u64>,
 }
 
+#[derive(Debug)]
 pub(crate) enum ConnectionError {
     Io(io::Error),
     Authentication(String),
@@ -215,7 +216,7 @@ impl Tunnel {
         let connector = forwarder.lock().unwrap().tcp_connector();
         let (fwd_rx, fwd_tx) =
             match tokio::time::timeout(
-                context.settings.tcp_connections_timeout,
+                context.settings.connection_establishment_timeout,
                 connector.connect(request_id.clone(), meta.clone()),
             ).await
                 .unwrap_or(Err(ConnectionError::Timeout))

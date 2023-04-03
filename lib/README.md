@@ -194,7 +194,7 @@ the metrics collecting requests (see `Settings.metrics`). An endpoint running wi
 will listen on the configured address (`MetricsSettings.address`) for plain HTTP/1 requests.
 The following paths are available:
 * `/health-check` - used for pinging the endpoint, so it will respond with `200 OK`
-* `/metrics` - used for metrics collecting, so it will respond with a bunch of values accoring to
+* `/metrics` - used for metrics collecting, so it will respond with a bunch of values according to
   [the prometheus specification](https://prometheus.io/)
 
 ## License

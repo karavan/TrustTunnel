@@ -61,8 +61,6 @@ The file struct reflects the library settings (`struct Settings` in [settings.rs
     /// Connections to the main hosts with paths starting with this mask are routed
     /// to the reverse proxy server. MUST start with slash.
     "path_mask": "/proxy",
-    /// The connection timeout
-    "connection_timeout_secs": Default(30),
     /// With this one set to `true` the endpoint overrides the HTTP method while
     /// translating an HTTP3 request to HTTP1 in case the request has the `GET` method
     /// and its path is `/`
@@ -72,14 +70,17 @@ The file struct reflects the library settings (`struct Settings` in [settings.rs
   "ipv6_available": Default(true),
   /// Whether connections to private network of the endpoint are allowed
   "allow_private_network_connections": Default(false),
-  /// Time out of a TLS handshake
+  /// Timeout of a TLS handshake
   "tls_handshake_timeout_secs": Default(10),
-  /// Time out of a client listener
+  /// Timeout of a client listener
   "client_listener_timeout_secs": Default(600),
-  /// Time out of tunneled TCP connections
-  "tcp_connections_timeout_secs": Default(30),
-  /// Time out of tunneled UDP "connections"
-  "udp_connections_timeout_secs": Default(30),
+  /// Timeout of connection establishment. For example, it is related to
+  /// client's connection requests.
+  connection_establishment_timeout_secs: Default(30),
+  /// Timeout of tunneled TCP connections
+  "tcp_connections_timeout_secs": Default(604800), /// 1 week
+  /// Timeout of tunneled UDP "connections"
+  "udp_connections_timeout_secs": Default(300),
   /// The forwarder codec settings
   "forward_protocol": Enum {
     Default("direct": {}),
@@ -171,7 +172,7 @@ The file struct reflects the library settings (`struct Settings` in [settings.rs
   "icmp": Optional {
     /// The name of an interface to bind the ICMP socket to
     "interface_name": "eth0",
-    /// Time out of tunneled ICMP requests
+    /// Timeout of tunneled ICMP requests
     "request_timeout_secs": Default(3),
     /// The capacity of the ICMP multiplexer received messages queue.
     /// Decreasing it may cause packet dropping in case the multiplexer cannot keep up the pace.
@@ -183,7 +184,7 @@ The file struct reflects the library settings (`struct Settings` in [settings.rs
   "metrics": Optional {
     /// The address to listen on for settings export requests
     "address": Default("0.0.0.0:1987"),
-    /// Time out of a metrics request
+    /// Timeout of a metrics request
     "request_timeout_secs": Default(3)
   }
 }

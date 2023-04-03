@@ -51,22 +51,28 @@ pub struct Settings {
     /// Whether connections to private network of the endpoint are allowed
     #[serde(default = "Settings::default_allow_private_network_connections")]
     pub(crate) allow_private_network_connections: bool,
-    /// Time out of a TLS handshake
+    /// Timeout of a TLS handshake
     #[serde(default = "Settings::default_tls_handshake_timeout")]
     #[serde(rename(deserialize = "tls_handshake_timeout_secs"))]
     #[serde(deserialize_with = "deserialize_duration_secs")]
     pub(crate) tls_handshake_timeout: Duration,
-    /// Time out of a client listener
+    /// Timeout of a client listener
     #[serde(default = "Settings::default_client_listener_timeout")]
     #[serde(rename(deserialize = "client_listener_timeout_secs"))]
     #[serde(deserialize_with = "deserialize_duration_secs")]
     pub(crate) client_listener_timeout: Duration,
-    /// Time out of tunneled TCP connections
+    /// Timeout of connection establishment. For example, it is related to
+    /// client's connection requests.
+    #[serde(default = "Settings::default_connection_establishment_timeout")]
+    #[serde(rename(deserialize = "connection_establishment_timeout_secs"))]
+    #[serde(deserialize_with = "deserialize_duration_secs")]
+    pub(crate) connection_establishment_timeout: Duration,
+    /// Timeout of tunneled TCP connections
     #[serde(default = "Settings::default_tcp_connections_timeout")]
     #[serde(rename(deserialize = "tcp_connections_timeout_secs"))]
     #[serde(deserialize_with = "deserialize_duration_secs")]
     pub(crate) tcp_connections_timeout: Duration,
-    /// Time out of tunneled UDP "connections"
+    /// Timeout of tunneled UDP "connections"
     #[serde(default = "Settings::default_udp_connections_timeout")]
     #[serde(rename(deserialize = "udp_connections_timeout_secs"))]
     #[serde(deserialize_with = "deserialize_duration_secs")]
@@ -147,11 +153,6 @@ pub struct ReverseProxySettings {
     pub(crate) server_address: SocketAddr,
     /// See [`ReverseProxySettingsBuilder::path_mask`]
     pub(crate) path_mask: String,
-    /// See [`ReverseProxySettingsBuilder::connection_timeout`]
-    #[serde(default = "Settings::default_tcp_connections_timeout")]
-    #[serde(rename(deserialize = "connection_timeout_secs"))]
-    #[serde(deserialize_with = "deserialize_duration_secs")]
-    pub(crate) connection_timeout: Duration,
     /// See [`ReverseProxySettingsBuilder::h3_backward_compatibility`]
     #[serde(default)]
     pub(crate) h3_backward_compatibility: bool,
@@ -232,7 +233,7 @@ pub struct RadiusAuthenticatorSettings {
 pub struct IcmpSettings {
     /// The name of an interface to bind the ICMP socket to
     pub(crate) interface_name: String,
-    /// Time out of tunneled ICMP requests
+    /// Timeout of tunneled ICMP requests
     #[serde(default = "IcmpSettings::default_request_timeout")]
     #[serde(rename(deserialize = "request_timeout_secs"))]
     #[serde(deserialize_with = "deserialize_duration_secs")]
@@ -250,7 +251,7 @@ pub struct MetricsSettings {
     /// The address to listen on for settings export requests
     #[serde(default = "MetricsSettings::default_listen_address")]
     pub(crate) address: SocketAddr,
-    /// Time out of a metrics request
+    /// Timeout of a metrics request
     #[serde(default = "MetricsSettings::default_request_timeout")]
     #[serde(rename(deserialize = "request_timeout_secs"))]
     #[serde(deserialize_with = "deserialize_duration_secs")]
@@ -412,6 +413,10 @@ impl Settings {
         Duration::from_secs(10 * 60)
     }
 
+    fn default_connection_establishment_timeout() -> Duration {
+        Duration::from_secs(30)
+    }
+
     fn default_tcp_connections_timeout() -> Duration {
         Duration::from_secs(604800) // 1 week (match client tcpip module)
     }
@@ -431,6 +436,7 @@ impl Default for Settings {
             allow_private_network_connections: true,
             tls_handshake_timeout: Default::default(),
             client_listener_timeout: Default::default(),
+            connection_establishment_timeout: Default::default(),
             tcp_connections_timeout: Default::default(),
             udp_connections_timeout: Default::default(),
             forward_protocol: Default::default(),
@@ -680,6 +686,7 @@ impl SettingsBuilder {
                 allow_private_network_connections: Settings::default_allow_private_network_connections(),
                 tls_handshake_timeout: Settings::default_tls_handshake_timeout(),
                 client_listener_timeout: Settings::default_client_listener_timeout(),
+                connection_establishment_timeout: Settings::default_connection_establishment_timeout(),
                 tcp_connections_timeout: Settings::default_tcp_connections_timeout(),
                 udp_connections_timeout: Settings::default_udp_connections_timeout(),
                 forward_protocol: Default::default(),
@@ -735,25 +742,25 @@ impl SettingsBuilder {
         self
     }
 
-    /// Set time out of TLS handshake
+    /// Set timeout of TLS handshake
     pub fn tls_handshake_timeout(mut self, v: Duration) -> Self {
         self.settings.tls_handshake_timeout = v;
         self
     }
 
-    /// Set time out of client listener
+    /// Set timeout of client listener
     pub fn client_listener_timeout(mut self, v: Duration) -> Self {
         self.settings.client_listener_timeout = v;
         self
     }
 
-    /// Set time out of tunneled TCP connections
+    /// Set timeout of tunneled TCP connections
     pub fn tcp_connections_timeout(mut self, v: Duration) -> Self {
         self.settings.tcp_connections_timeout = v;
         self
     }
 
-    /// Set time out of tunneled UDP "connections"
+    /// Set timeout of tunneled UDP "connections"
     pub fn udp_connections_timeout(mut self, v: Duration) -> Self {
         self.settings.udp_connections_timeout = v;
         self
@@ -1049,7 +1056,6 @@ impl ReverseProxySettingsBuilder {
             settings: ReverseProxySettings {
                 server_address: (Ipv4Addr::UNSPECIFIED, 0).into(),
                 path_mask: Default::default(),
-                connection_timeout: Settings::default_tcp_connections_timeout(),
                 h3_backward_compatibility: false,
             }
         }
@@ -1074,12 +1080,6 @@ impl ReverseProxySettingsBuilder {
     /// MUST start with slash.
     pub fn path_mask(mut self, v: String) -> Self {
         self.settings.path_mask = v;
-        self
-    }
-
-    /// Set the connection timeout
-    pub fn connection_timeout(mut self, v: Duration) -> Self {
-        self.settings.connection_timeout = v;
         self
     }
 

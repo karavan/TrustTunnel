@@ -277,6 +277,18 @@ impl pipe::Sink for ForwardedStreamSink {
             SinkState::TransferringBodyChunked(x) => x.sink.wait_writable().await,
         }
     }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        let sink = match self.state {
+            SinkState::Idle | SinkState::WaitingResponse(_) => return Ok(()),
+            SinkState::TransferringBodyNonEncoded(ref mut x) => &mut x.sink,
+            SinkState::WaitingChunkPrefix(ref mut x) => &mut x.sink,
+            SinkState::TransferringBodyChunked(ref mut x) => &mut x.sink,
+            SinkState::WaitingChunkSuffix(ref mut x) => &mut x.sink,
+        };
+
+        sink.flush().await
+    }
 }
 
 impl ForwardedStreamSink {

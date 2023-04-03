@@ -279,7 +279,6 @@ mod tests {
         ReverseProxySettings {
             server_address: "0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap(),
             path_mask: Default::default(),
-            connection_timeout: Default::default(),
             h3_backward_compatibility: Default::default(),
         }
     }
