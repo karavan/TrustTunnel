@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::io::ErrorKind;
 use rustls::{Certificate, PrivateKey};
 use crate::{net_utils, settings, utils};
 use crate::net_utils::Channel;
@@ -141,12 +140,9 @@ impl TlsDemux {
             main_hosts: make_hosts!(tls_settings.main_hosts)?,
             ping_hosts: make_hosts!(tls_settings.ping_hosts)?,
             speedtest_hosts: make_hosts!(tls_settings.speedtest_hosts)?,
-            reverse_proxy_hosts: match (settings.reverse_proxy.as_ref(), &tls_settings.reverse_proxy_hosts) {
-                (None, _) => Default::default(),
-                (Some(_), x) if !x.is_empty() => make_hosts!(x)?,
-                _ => return Err(io::Error::new(
-                    ErrorKind::Other, "Reverse proxy is set up but no TLS hosts are specified for it".to_string(),
-                )),
+            reverse_proxy_hosts: match settings.reverse_proxy {
+                None => Default::default(),
+                Some(_) => make_hosts!(tls_settings.reverse_proxy_hosts)?,
             },
             tunnel_protocols: settings.listen_protocols.iter()
                 .map(|x| match x {
@@ -500,6 +496,6 @@ mod tests {
         let mut settings = Settings::default();
         settings.reverse_proxy = Some(dummy_reverse_proxy_settings());
 
-        TlsDemux::new(&settings, &TlsHostsSettings::default()).map(|_| ()).unwrap_err();
+        TlsDemux::new(&settings, &TlsHostsSettings::default()).map(|_| ()).unwrap();
     }
 }
