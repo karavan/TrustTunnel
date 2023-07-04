@@ -48,13 +48,12 @@ impl Forwarder for DirectForwarder {
     fn make_udp_datagram_multiplexer(
         &self,
         id: log_utils::IdChain<u64>,
-        meta: forwarder::UdpMultiplexerMeta,
+        _: forwarder::UdpMultiplexerMeta,
     ) -> io::Result<(
         Arc<dyn forwarder::UdpDatagramPipeShared>,
         Box<dyn datagram_pipe::Source<Output = forwarder::UdpDatagramReadStatus>>,
         Box<dyn datagram_pipe::Sink<Input = downstream::UdpDatagram>>,
     )> {
-        assert!(meta.auth.is_none());
         udp_forwarder::make_multiplexer(id)
     }
 
