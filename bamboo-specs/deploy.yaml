@@ -4,8 +4,8 @@ triggers: [ ]
 
 plan:
   project-key: CL
-  key: VLEBD
-  name: VpnLibsEndpoint - Deploy
+  key: TTE
+  name: TrustTunnel - Deploy
 
 stages:
   - Build artifacts:
@@ -13,7 +13,7 @@ stages:
       final: false
       jobs:
         - Build on Linux
-        - Build on macOS
+        # - Build on macOS
   - Deploy artifacts:
       manual: false
       final: false
@@ -41,42 +41,69 @@ Build on Linux:
           - |-
             #!/bin/bash
             set -x -e
-            cargo build --release --target x86_64-unknown-linux-gnu
-            cp target/x86_64-unknown-linux-gnu/release/vpn_endpoint target/vpn_endpoint.linux-x86_64
+
+            # Build for x86_64 (use musl for static binaries)
+            CC=x86_64-linux-musl-gcc \
+            CXX=x86_64-linux-musl-g++ \
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc \
+            BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/opt/cross/x86_64-linux-musl" \
+            cargo build --release --target x86_64-unknown-linux-musl
+
+            cp target/x86_64-unknown-linux-musl/release/vpn_endpoint target/vpn_endpoint.linux-x86_64
+            cp target/x86_64-unknown-linux-musl/release/setup_wizard target/setup_wizard.linux-x86_64
+
+            # Build for aarch64 (use musl for static binaries)
+            CC=aarch64-linux-musl-gcc \
+            CXX=aarch64-linux-musl-g++ \
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
+            BINDGEN_EXTRA_CLANG_ARGS="--sysroot=/opt/cross/aarch64-linux-musl" \
+            cargo build --release --target aarch64-unknown-linux-musl
+            mkdir -p build_linux
+            VERSION=$(cat endpoint/Cargo.toml | grep "version = " | head -n 1 | sed -e 's/version = "\(.*\)"/\1/')
+            NAME=trusttunnel-v${VERSION}-linux-aarch64
+            tar zcf build_linux/${NAME}.tar.gz --transform "s,^,${NAME}/," \
+                target/aarch64-unknown-linux-musl/release/vpn_endpoint \
+                target/aarch64-unknown-linux-musl/release/setup_wizard \
+                LICENSE
+            NAME=trusttunnel-v${VERSION}-linux-x86_64
+            tar zcf build_linux/${NAME}.tar.gz --transform "s,^,${NAME}/," \
+                target/x86_64-unknown-linux-musl/release/vpn_endpoint \
+                target/x86_64-unknown-linux-musl/release/setup_wizard \
+                LICENSE
   requirements:
     - adg-privileged-docker
   artifact-subscriptions: [ ]
   artifacts:
-    - name: Build result Linux
-      location: target
-      pattern: 'vpn_endpoint.linux-x86_64'
-      required: false
+    - name: Build for Linux
+      location: build_linux
+      pattern: 'trusttunnel_client-.*.tar.gz'
+      required: true
       shared: true
 
-Build on macOS:
-  key: BM
-  tasks:
-    - checkout:
-        description: Checkout Default Repository
-        force-clean-build: 'true'
-    - script:
-        interpreter: SHELL
-        scripts:
-          - |-
-            #!/bin/bash
-            set -x -e
-            cargo build --release --target x86_64-apple-darwin
-            cp target/x86_64-apple-darwin/release/vpn_endpoint target/vpn_endpoint.osx-x86_64
-  requirements:
-    - ephemeral
-    - image: registry.int.agrd.dev/macos/sequoia-build-agent-xcode16.1:latest
-  artifact-subscriptions: [ ]
-  artifacts:
-    - name: Build result macOS
-      location: target
-      pattern: 'vpn_endpoint.osx-x86_64'
-      required: false
-      shared: true
+# Build on macOS:
+#   key: BM
+#   tasks:
+#     - checkout:
+#         description: Checkout Default Repository
+#         force-clean-build: 'true'
+#     - script:
+#         interpreter: SHELL
+#         scripts:
+#           - |-
+#             #!/bin/bash
+#             set -x -e
+#             cargo build --release --target x86_64-apple-darwin
+#             cp target/x86_64-apple-darwin/release/vpn_endpoint target/vpn_endpoint.osx-x86_64
+#   requirements:
+#     - ephemeral
+#     - image: registry.int.agrd.dev/macos/sequoia-build-agent-xcode16.1:latest
+#   artifact-subscriptions: [ ]
+#   artifacts:
+#     - name: Build result macOS
+#       location: target
+#       pattern: 'vpn_endpoint.osx-x86_64'
+#       required: false
+#       shared: true
 
 Deploy artifacts:
   key: DA
@@ -97,67 +124,26 @@ Deploy artifacts:
         scripts:
           - |-
             #!/bin/bash
-            
             set -x -e
-            VERSION=$(cat Cargo.toml | grep "version = " | head -n 1 | sed -e 's/version = "\(.*\)"/\1/')
-            ART_URL=${bamboo.artifactoryAdguardMavenUrl}
-            ART_VER=${VERSION}
-            
-            # Build
-            pushd vpn-endpoint-build-results
-            zip ../vpn_endpoint-$VERSION.zip *
-            popd
-            
-            # Tag release or change URL to snapshots
-            case "${bamboo_repository_branch_name}" in
-            master|stable-*)
-              git remote set-url origin ${bamboo_planRepository_repositoryUrl}
-              git reset
-              git tag v$VERSION || true
-              git push origin v$VERSION
-              ;;
-            *)
-              ART_VER="${ART_VER}-snapshot"
-              ART_URL=${bamboo.artifactoryAdguardMavenSnapshotsUrl}
-              ;;
-            esac
-            
-            # Deploy to Maven
-            cat > settings.xml <<EOF
-            <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                                    https://maven.apache.org/xsd/settings-1.0.0.xsd">
-              <servers>
-                <server>
-                  <id>Artifactory</id>
-                    <username>${bamboo.artifactoryUser}</username>
-                    <password>${bamboo.artifactoryPassword}</password>
-                </server>
-              </servers>
-            </settings>
-            EOF
-            mvn --settings settings.xml deploy:deploy-file \
-              -DgroupId=com.adguard.corelibs \
-              -DartifactId=vpn-libs-endpoint \
-              -Dversion=$ART_VER \
-              -Dpackaging=zip \
-              -Dfile=vpn_endpoint-${VERSION}.zip \
-              -DrepositoryId=Artifactory \
-              -Durl=$ART_URL
-            rm settings.xml
+
+            VERSION=$(cat endpoint/Cargo.toml | grep "version = " | head -n 1 | sed -e 's/version = "\(.*\)"/\1/')
+            # TODO: change to bamboo_githubPublicRepoPassword when repo become public
+            git clone https://${bamboo_githubPrivateRepoPassword}:@github.com/TrustTunnel/TrustTunnel/
+            cd TrustTunnel
+            TAG=v${VERSION}
+            CHANGELOG_URL="https://github.com/TrustTunnel/TrustTunnel/blob/${TAG}/CHANGELOG.md"
+            # TODO: change to bamboo_githubPublicRepoPassword when repo become public
+            gh config set -h github.com oauth_token "${bamboo_githubPrivateRepoPassword}" || exit 1
+            gh release delete -y --cleanup-tag ${TAG} || true
+            gh release create ${TAG} -p -t "${TAG}" -n "See [CHANGELOG.md](${CHANGELOG_URL}) for the list of changes."
+            gh release upload ${TAG} ../build_linux/trusttunnel-v${VERSION}-linux-x86_64.tar.gz
+            gh release upload ${TAG} ../build_linux/trusttunnel-v${VERSION}-linux-aarch64.tar.gz
   requirements:
     - adg-privileged-docker
   artifact-subscriptions:
-    - artifact: Build result Linux
-      destination: vpn-endpoint-build-results
-    - artifact: Build result macOS
-      destination: vpn-endpoint-build-results
-  artifacts:
-    - name: Distribution
-      location: .
-      pattern: 'vpn_endpoint-*.zip'
-      required: false
+    - artifact: Build for Linux
+      destination: build_linux
+  artifacts: []
 
 repositories:
   - core-libs/vpn-libs-endpoint:
