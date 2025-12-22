@@ -25,7 +25,10 @@ pub fn build() -> Built {
                 .clone()
                 .unwrap_or_else(|| {
                     ask_for_input(
-                        Settings::doc_listen_address(),
+                        &format!(
+                            "{} (use 0.0.0.0:443 for all interfaces on HTTPS port)",
+                            Settings::doc_listen_address()
+                        ),
                         Some(Settings::default_listen_address().to_string()),
                     )
                 }),

@@ -1,6 +1,9 @@
-use crate::user_interaction::{ask_for_agreement, ask_for_input, checked_overwrite};
+use crate::acme::{
+    issue_certificate, validate_domain, validate_email, AcmeConfig, ChallengeMethod, IssuedCert,
+};
+use crate::user_interaction::{ask_for_agreement, ask_for_input, checked_overwrite, select_index};
 use crate::Mode;
-use chrono::Datelike;
+use chrono::{Datelike, Duration, Local};
 use rcgen::DnType;
 use std::fs;
 use std::io::Write;
@@ -14,75 +17,119 @@ const DEFAULT_CERTIFICATE_DURATION_DAYS: u64 = 365;
 const DEFAULT_CERTIFICATE_FOLDER: &str = "certs";
 const DEFAULT_HOSTNAME: &str = "vpn.endpoint";
 
-pub fn build() -> TlsHostsSettings {
-    let cert = (crate::get_predefined_params().hostname.is_some()
-        || crate::get_mode() == Mode::NonInteractive)
-        .then(generate_cert)
-        .flatten()
-        .or_else(|| {
-            lookup_existent_cert().and_then(|x| {
-                (crate::get_mode() != Mode::NonInteractive
-                    && ask_for_agreement(&format!("Use an existing certificate? {:?}", x)))
-                .then_some(x)
-            })
+pub struct TlsHostsSettingsResult {
+    pub settings: TlsHostsSettings,
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+pub fn build() -> TlsHostsSettingsResult {
+    loop {
+        if let Some(cert) = build_with_runtime() {
+            let cert_path = cert.cert_path.clone();
+            let key_path = cert.key_path.clone();
+            return TlsHostsSettingsResult {
+                settings: build_settings_from_cert(cert),
+                cert_path,
+                key_path,
+            };
+        }
+        // In non-interactive mode, we can't retry
+        if crate::get_mode() == Mode::NonInteractive {
+            panic!("Certificate is required in non-interactive mode");
+        }
+        println!("\nNo certificate was created. Let's try again.\n");
+    }
+}
+
+pub fn build_with_runtime() -> Option<Cert> {
+    // Check for non-interactive mode with ACME parameters
+    let predefined = crate::get_predefined_params();
+    if crate::get_mode() == Mode::NonInteractive {
+        // Check if Let's Encrypt is requested via CLI
+        if let Some(ref cert_type) = predefined.cert_type {
+            if cert_type == "letsencrypt" {
+                return generate_letsencrypt_cert_noninteractive();
+            }
+        }
+        // Default to self-signed for non-interactive
+        return generate_cert();
+    }
+    drop(predefined);
+
+    // Interactive mode
+    lookup_existent_cert()
+        .and_then(|x| {
+            ask_for_agreement(&format!("Use an existing certificate? {:?}", x)).then_some(x)
         })
         .or_else(|| {
-            ask_for_agreement("Generate a self-signed certificate?")
-                .then(generate_cert)
-                .flatten()
-        })
-        .or_else(|| {
-            let pair = ask_for_input::<String>(
-                "Path to key/certificate pair. Divide by space if they are in separate files.\n",
-                None,
+            let options = [
+                "Issue a Let's Encrypt certificate (requires a public domain)",
+                "Generate a self-signed certificate",
+                "Provide path to existing certificate",
+            ];
+
+            let selection = select_index(
+                "How would you like to create a certificate?",
+                &options,
+                Some(0),
             );
 
-            let mut iter = pair.splitn(2, char::is_whitespace);
-            let x = match (iter.next().unwrap(), iter.next()) {
-                (a, None) => Either::Left(a),
-                (a, Some(b)) => Either::Right((a, b)),
-            };
-
-            let x = parse_cert(x);
-            if x.is_none() {
-                println!("Couldn't parse the provided key/certificate pair");
+            match selection {
+                0 => generate_letsencrypt_cert(),
+                1 => generate_cert(),
+                2 => ask_for_existing_cert(),
+                _ => unreachable!(),
             }
-            x
-        });
+        })
+}
 
-    let hostname = cert
-        .as_ref()
-        .map(|x| x.common_name.clone())
-        .or_else(|| crate::get_predefined_params().hostname.clone())
-        .unwrap_or_else(|| {
-            ask_for_input::<String>(
-                "Endpoint hostname (used for serving TLS connections)",
-                Some(DEFAULT_HOSTNAME.into()),
-            )
-        });
+fn ask_for_existing_cert() -> Option<Cert> {
+    let pair = ask_for_input::<String>(
+        "Path to certificate file(s):\n  \
+         - Single file containing both cert and key: /path/to/combined.pem\n  \
+         - Separate files: /path/to/cert.pem /path/to/key.pem\n",
+        None,
+    );
+
+    let mut iter = pair.splitn(2, char::is_whitespace);
+    let x = match (iter.next().unwrap(), iter.next()) {
+        (a, None) => Either::Left(a),
+        (a, Some(b)) => Either::Right((a, b)),
+    };
+
+    let x = parse_cert(x);
+    if x.is_none() {
+        println!("Couldn't parse the provided key/certificate pair");
+    }
+    x
+}
+
+fn build_settings_from_cert(cert: Cert) -> TlsHostsSettings {
+    let hostname = cert.common_name.clone();
 
     TlsHostsSettings::builder()
         .main_hosts(vec![TlsHostInfo {
             hostname: hostname.clone(),
-            cert_chain_path: cert.as_ref().unwrap().cert_path.clone(),
-            private_key_path: cert.as_ref().unwrap().key_path.clone(),
+            cert_chain_path: cert.cert_path.clone(),
+            private_key_path: cert.key_path.clone(),
         }])
         .ping_hosts(vec![TlsHostInfo {
             hostname: format!("ping.{}", hostname),
-            cert_chain_path: cert.as_ref().unwrap().cert_path.clone(),
-            private_key_path: cert.as_ref().unwrap().key_path.clone(),
+            cert_chain_path: cert.cert_path.clone(),
+            private_key_path: cert.key_path.clone(),
         }])
         .speedtest_hosts(vec![TlsHostInfo {
             hostname: format!("speed.{}", hostname),
-            cert_chain_path: cert.as_ref().unwrap().cert_path.clone(),
-            private_key_path: cert.as_ref().unwrap().key_path.clone(),
+            cert_chain_path: cert.cert_path.clone(),
+            private_key_path: cert.key_path.clone(),
         }])
         .build()
         .expect("Couldn't build TLS hosts settings")
 }
 
-#[derive(Debug)]
-struct Cert {
+#[derive(Debug, Clone)]
+pub struct Cert {
     common_name: String,
     #[allow(dead_code)] // needed only for logging
     alt_names: Vec<String>,
@@ -203,7 +250,7 @@ fn generate_cert() -> Option<Cert> {
     }
 
     let key_path = format!("{DEFAULT_CERTIFICATE_FOLDER}/key.pem");
-    if !checked_overwrite(&cert_path, "Overwrite the existing private key file?") {
+    if !checked_overwrite(&key_path, "Overwrite the existing private key file?") {
         return None;
     }
 
@@ -213,7 +260,7 @@ fn generate_cert() -> Option<Cert> {
         .expect("Couldn't write the certificate into a file");
     println!("The generated certificate is stored in file: {}", cert_path);
 
-    fs::create_dir_all(Path::new(&cert_path).parent().unwrap())
+    fs::create_dir_all(Path::new(&key_path).parent().unwrap())
         .expect("Couldn't create private key directory path");
     if key_path != cert_path {
         fs::write(key_path.clone(), cert.serialize_private_key_pem())
@@ -236,4 +283,211 @@ fn generate_cert() -> Option<Cert> {
         cert_path,
         key_path,
     })
+}
+
+fn save_issued_cert(issued: IssuedCert, interactive: bool) -> Option<Cert> {
+    let cert_path = format!("{}/cert.pem", DEFAULT_CERTIFICATE_FOLDER);
+    let key_path = format!("{}/key.pem", DEFAULT_CERTIFICATE_FOLDER);
+
+    if interactive {
+        if !checked_overwrite(&cert_path, "Overwrite the existing certificate file?") {
+            return None;
+        }
+        if !checked_overwrite(&key_path, "Overwrite the existing private key file?") {
+            return None;
+        }
+    }
+
+    fs::create_dir_all(DEFAULT_CERTIFICATE_FOLDER).expect("Couldn't create certificate directory");
+
+    fs::write(&cert_path, &issued.cert_pem).expect("Couldn't write the certificate to file");
+    println!("Certificate saved to: {}", cert_path);
+
+    fs::write(&key_path, &issued.key_pem).expect("Couldn't write the private key to file");
+    println!("Private key saved to: {}", key_path);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = fs::metadata(&key_path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            fs::set_permissions(&key_path, perms).ok();
+        }
+    }
+
+    let expiration_date = parse_cert_expiration(&issued.cert_pem).unwrap_or_else(|| {
+        Local::now()
+            .checked_add_signed(Duration::days(90))
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "90 days from now".to_string())
+    });
+
+    Some(Cert {
+        common_name: issued.domain.clone(),
+        alt_names: vec![issued.domain],
+        expiration_date,
+        cert_path,
+        key_path,
+    })
+}
+
+fn generate_letsencrypt_cert() -> Option<Cert> {
+    println!("Let's issue a Let's Encrypt certificate.");
+
+    // Get domain name
+    let domain: String = loop {
+        let domain: String =
+            ask_for_input("Enter your domain name (must be publicly accessible)", None);
+        if validate_domain(&domain) {
+            break domain;
+        }
+        println!(
+            "Invalid domain format. Please enter a valid domain name (e.g., vpn.example.com)."
+        );
+    };
+
+    // Get email address
+    let email: String = loop {
+        let email: String = ask_for_input(
+            "Enter your email address (for Let's Encrypt notifications)",
+            None,
+        );
+        if validate_email(&email) {
+            break email;
+        }
+        println!("Invalid email format. Please try again.");
+    };
+
+    // Select challenge method
+    let challenge_options = [
+        "HTTP-01 (requires port 80 accessible from internet)",
+        "DNS-01 (requires adding a TXT record to your DNS)",
+    ];
+    let challenge_selection = select_index("Select challenge method", &challenge_options, Some(0));
+    let challenge_method = match challenge_selection {
+        0 => ChallengeMethod::Http01,
+        1 => ChallengeMethod::Dns01,
+        _ => unreachable!(),
+    };
+
+    // Ask about staging environment
+    let use_staging = ask_for_agreement(
+        "Use Let's Encrypt staging environment for testing? (recommended for first attempt)",
+    );
+
+    if use_staging {
+        println!("\n⚠️  Using staging environment. Certificate will NOT be trusted by browsers.");
+        println!("   Run again without staging for a production certificate.\n");
+    }
+
+    let config = AcmeConfig {
+        domain,
+        email,
+        challenge_method,
+        use_staging,
+    };
+
+    // Run the async ACME flow
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let result = runtime.block_on(issue_certificate(config));
+
+    match result {
+        Ok(issued) => save_issued_cert(issued, true),
+        Err(ref e) => {
+            println!("\n❌ Failed to issue Let's Encrypt certificate: {}", e);
+            println!("\nPossible solutions:");
+            match e {
+                crate::acme::AcmeError::PortInUse(_) => {
+                    println!("  • Stop any service using port 80, or");
+                    println!("  • Use DNS-01 challenge instead");
+                }
+                crate::acme::AcmeError::ChallengeFailed(_) => {
+                    println!("  • Verify your domain resolves to this server's IP");
+                    println!("  • Check firewall allows inbound HTTP (port 80)");
+                    println!("  • For DNS-01, ensure TXT record is correct and propagated");
+                }
+                _ => {
+                    println!("  • Check your internet connection");
+                    println!("  • Try using the staging environment first");
+                }
+            }
+
+            if ask_for_agreement("Would you like to generate a self-signed certificate instead?") {
+                generate_cert()
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn generate_letsencrypt_cert_noninteractive() -> Option<Cert> {
+    let predefined = crate::get_predefined_params();
+
+    let domain = predefined
+        .hostname
+        .clone()
+        .expect("Hostname is required for Let's Encrypt in non-interactive mode");
+    if !validate_domain(&domain) {
+        eprintln!("Invalid domain format: {}", domain);
+        return None;
+    }
+    let email = predefined
+        .acme_email
+        .clone()
+        .expect("ACME email is required for Let's Encrypt in non-interactive mode");
+    if !validate_email(&email) {
+        eprintln!("Invalid email format: {}", email);
+        return None;
+    }
+    let challenge_method = predefined
+        .acme_challenge
+        .clone()
+        .map(|s| {
+            let method = s.parse::<ChallengeMethod>()
+                .expect("Invalid challenge method");
+            if method == ChallengeMethod::Dns01 {
+                panic!("DNS-01 challenge is not supported in non-interactive mode (requires manual DNS record confirmation)");
+            }
+            method
+        })
+        .unwrap_or(ChallengeMethod::Http01);
+    let use_staging = predefined.acme_staging;
+
+    drop(predefined);
+
+    if use_staging {
+        println!("⚠️  Using Let's Encrypt staging environment");
+    }
+
+    let config = AcmeConfig {
+        domain,
+        email,
+        challenge_method,
+        use_staging,
+    };
+
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+    let result = runtime.block_on(issue_certificate(config));
+
+    match result {
+        Ok(issued) => save_issued_cert(issued, false),
+        Err(e) => {
+            eprintln!("Failed to issue Let's Encrypt certificate: {}", e);
+            None
+        }
+    }
+}
+
+fn parse_cert_expiration(cert_pem: &str) -> Option<String> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()).ok()?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents).ok()?;
+    let not_after = cert.validity.not_after.to_datetime();
+    Some(format!(
+        "{:04}-{:02}-{:02}",
+        not_after.year(),
+        not_after.month(),
+        not_after.day()
+    ))
 }

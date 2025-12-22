@@ -1,5 +1,10 @@
 # CHANGELOG
 
+- Added automatic Let's Encrypt certificate generation to `setup_wizard`
+- Added [CONFIGURATION.md](CONFIGURATION.md)
+- Improved the CLI interface of `setup_wizard` and provided better post-setup
+  guidance there.
+
 ## 0.9.77
 
 - Added install script for the endpoint

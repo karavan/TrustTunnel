@@ -61,20 +61,34 @@ endpoint/clean:
 .PHONY: lint
 lint: lint-md lint-rust
 
-.PHONY: lint-md
 ## Lint markdown files.
 ## `markdownlint-cli` should be installed:
 ##    macOS: `brew install markdownlint-cli`
 ##    Linux: `npm install -g markdownlint-cli`
+.PHONY: lint-md
 lint-md:
 	markdownlint .
 
-.PHONY: lint-rust
 ## Check Rust code formatting with rustfmt.
 ## `rustfmt` should be installed:
 ##    rustup component add rustfmt
+.PHONY: lint-rust
 lint-rust:
 	cargo fmt --all -- --check
+
+## Fix linter issues that are auto-fixable.
+.PHONY: lint-fix
+lint-fix: lint-fix-rust lint-fix-md
+
+## Auto-fix Rust code formatting issues with rustfmt.
+.PHONY: lint-fix-rust
+lint-fix-rust:
+	cargo fmt --all
+
+## Auto-fix markdown files.
+.PHONY: lint-fix-md
+lint-fix-md:
+	markdownlint --fix .
 
 .PHONY: test
 test: test-rust
