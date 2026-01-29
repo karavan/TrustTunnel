@@ -1,5 +1,8 @@
 # CHANGELOG
 
+- Endpoint now requires credentials when listening on a public address.
+- Added support of shortened QUIC settings names in configuration files.
+
 ## 0.9.115
 
 - Fixed an issue where `client_random_prefix` rules didn’t match when Anti-DPI or post-quantum cryptography was enabled.
