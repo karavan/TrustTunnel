@@ -72,7 +72,7 @@ in one or two bytes.
 | `0x05` | `username` | UTF-8 string | yes |
 | `0x06` | `password` | UTF-8 string | yes |
 | `0x07` | `skip_verification` | 1 byte: `0x01` = true, `0x00` = false | no (default `false`) |
-| `0x08` | `certificate` | UTF-8, PEM-encoded certificate chain | no |
+| `0x08` | `certificate` | Concatenated DER-encoded certificates (raw binary) | no |
 | `0x09` | `upstream_protocol` | 1 byte: `0x01` = `http2`, `0x02` = `http3` | no (default `http2`) |
 | `0x0A` | `anti_dpi` | 1 byte: `0x01` = true, `0x00` = false | no (default `false`) |
 
@@ -120,7 +120,7 @@ anti_dpi = false
    Tag=0x04  Len=1   Value=0x01              (has_ipv6 = true)
    Tag=0x05  Len=7   Value="premium"
    Tag=0x06  Len=10  Value="s3cretPass"
-   Tag=0x08  Len=N   Value="-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+   Tag=0x08  Len=N   Value=<concatenated DER bytes of the certificate chain>
    Tag=0x09  Len=1   Value=0x01              (http2)
    ```
 
